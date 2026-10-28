@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>日期查帳</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#222; --sub:#777; --line:#e5e7eb; --accent:#06c755; --bar:#06c755; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111418; --card:#1c2128; --text:#eaeef2; --sub:#9aa4af; --line:#2b323b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:12px; font-family:-apple-system,"Noto Sans TC","PingFang TC",sans-serif; background:var(--bg); color:var(--text); }
+  .card { background:var(--card); border-radius:12px; padding:14px; margin-bottom:12px; }
+  h2 { margin:0 0 10px; font-size:16px; }
+  .filters { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  input[type=date] { flex:1; min-width:130px; padding:8px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--text); }
+  button { padding:9px 14px; border:0; border-radius:8px; background:var(--accent); color:#fff; font-size:14px; }
+  button.sec { background:transparent; color:var(--text); border:1px solid var(--line); }
+  .quick { display:flex; gap:6px; margin-top:8px; }
+  .quick button { flex:1; padding:6px; font-size:13px; }
+  .total { font-size:30px; font-weight:700; }
+  .sub { color:var(--sub); font-size:13px; }
+  .bar-row { margin:8px 0; font-size:13px; }
+  .bar-top { display:flex; justify-content:space-between; }
+  .bar-bg { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:3px; }
+  .bar-fg { height:100%; background:var(--bar); }
+  .item { display:flex; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--line); gap:8px; }
+  .item:last-child { border-bottom:0; }
+  .item .l { min-width:0; }
+  .item .n { font-weight:600; word-break:break-all; }
+  .amt { font-weight:700; white-space:nowrap; }
+  #msg { text-align:center; padding:20px; color:var(--sub); }
+  .err { color:#d9302c !important; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>📅 篩選日期</h2>
+  <div class="filters">
+    <input type="date" id="start"><span>~</span><input type="date" id="end">
+    <button id="go">查詢</button>
+  </div>
+  <div class="quick">
+    <button class="sec" data-r="today">今天</button>
+    <button class="sec" data-r="week">近 7 天</button>
+    <button class="sec" data-r="month">本月</button>
+  </div>
+</div>
+<div id="msg">載入中…</div>
+<div id="result" hidden>
+  <div class="card">
+    <div class="sub">區間總支出</div>
+    <div class="total" id="total">$0</div>
+    <div class="sub" id="count"></div>
+  </div>
+  <div class="card"><h2>分類占比</h2><div id="cats"></div></div>
+  <div class="card">
+    <h2>交易清單</h2>
+    <div id="list"></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button id="dl">下載 CSV</button>
+      <button class="sec" id="cp">複製 CSV</button>
+    </div>
+  </div>
+</div>
+
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script>
+// ====== 請改成你自己的設定 ======
+const LIFF_ID = 'YOUR_LIFF_ID';
+const GAS_URL = 'YOUR_GAS_WEB_APP_URL'; // 以 /exec 結尾
+// =================================
+
+const $ = id => document.getElementById(id);
+let current = null;
+
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+const fmt = n => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+function setRange(r) {
+  const now = new Date(); let s = new Date(now);
+  if (r === 'week') s.setDate(now.getDate() - 6);
+  if (r === 'month') s = new Date(now.getFullYear(), now.getMonth(), 1);
+  $('start').value = ymd(s); $('end').value = ymd(now);
+}
+
+function showMsg(t, isErr) {
+  $('msg').hidden = false; $('msg').textContent = t;
+  $('msg').className = isErr ? 'err' : '';
+  $('result').hidden = true;
+}
+
+async function load() {
+  showMsg('查詢中…');
+  try {
+    const token = liff.getIDToken();
+    if (!token) { liff.login(); return; }
+    const url = GAS_URL + '?action=list&idToken=' + encodeURIComponent(token) +
+      '&start=' + $('start').value + '&end=' + $('end').value;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.error) {
+      if (/expired/i.test(data.error)) { liff.logout(); liff.login(); return; }
+      throw new Error(data.error);
+    }
+    current = data; render(data);
+  } catch (e) { showMsg('讀取失敗：' + e.message, true); }
+}
+
+function render(d) {
+  $('msg').hidden = true; $('result').hidden = false;
+  $('total').textContent = '$' + fmt(d.total);
+  $('count').textContent = '共 ' + d.count + ' 筆';
+  const cats = $('cats'); cats.replaceChildren();
+  Object.entries(d.byCat).sort((a, b) => b[1] - a[1]).forEach(([c, v]) => {
+    const pct = d.total ? Math.round(v / d.total * 100) : 0;
+    const row = document.createElement('div'); row.className = 'bar-row';
+    const top = document.createElement('div'); top.className = 'bar-top';
+    const a = document.createElement('span'); a.textContent = c;
+    const b = document.createElement('span'); b.textContent = '$' + fmt(v) + '（' + pct + '%）';
+    top.append(a, b);
+    const bg = document.createElement('div'); bg.className = 'bar-bg';
+    const fg = document.createElement('div'); fg.className = 'bar-fg'; fg.style.width = pct + '%';
+    bg.append(fg); row.append(top, bg); cats.append(row);
+  });
+  const list = $('list'); list.replaceChildren();
+  if (!d.records.length) { list.textContent = '此區間沒有紀錄'; return; }
+  d.records.forEach(r => {
+    const el = document.createElement('div'); el.className = 'item';
+    const l = document.createElement('div'); l.className = 'l';
+    const n = document.createElement('div'); n.className = 'n'; n.textContent = r.item;
+    const s = document.createElement('div'); s.className = 'sub';
+    s.textContent = r.time + ' · ' + r.cat + (r.note ? ' · ' + r.note : '');
+    l.append(n, s);
+    const m = document.createElement('div'); m.className = 'amt'; m.textContent = '$' + fmt(r.amount);
+    el.append(l, m); list.append(el);
+  });
+}
+
+function toCSV() {
+  const esc = v => {
+    let s = String(v ?? '');
+    if (/^[=+\-@]/.test(s)) s = "'" + s; // 防 CSV 公式注入
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const rows = [['時間', '品項', '金額', '分類', '備註']];
+  current.records.forEach(r => rows.push([r.time, r.item, r.amount, r.cat, r.note]));
+  return rows.map(r => r.map(esc).join(',')).join('\n');
+}
+
+$('dl').onclick = () => {
+  if (!current) return;
+  const blob = new Blob(['\ufeff' + toCSV()], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '記帳_' + $('start').value + '_' + $('end').value + '.csv';
+  document.body.append(a); a.click(); a.remove();
+};
+$('cp').onclick = async () => {
+  if (!current) return;
+  try { await navigator.clipboard.writeText(toCSV()); alert('已複製，可貼到試算表'); }
+  catch (e) { alert('複製失敗，請改用「下載 CSV」'); }
+};
+$('go').onclick = load;
+document.querySelectorAll('.quick button').forEach(b => b.onclick = () => { setRange(b.dataset.r); load(); });
+
+liff.init({ liffId: LIFF_ID }).then(() => {
+  if (!liff.isLoggedIn()) { liff.login(); return; }
+  setRange('month'); load();
+}).catch(e => showMsg('LIFF 初始化失敗：' + e.message, true));
+</script>
+</body>
+</html>
